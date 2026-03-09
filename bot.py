@@ -6,14 +6,13 @@ import threading
 import re # Imported for regex matching
 from io import BytesIO
 from telebot import types
-from dotenv import load_dotenv
+from pymongo import MongoClient
 import os
 import datetime
 import time
 
-# Load bot token from .env
-load_dotenv()
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = "8041458444:AAEr8-myga5iOfeYjRFiWzBq56_3ljSOXMc"
+MONGO_URI = "mongodb+srv://hossain:N92MH29a6Ohl45bu@cluster0.bbz0nai.mongodb.net/rewardrush?retryWrites=true&w=majority"
 
 # Initialize bot
 bot = telebot.TeleBot(BOT_TOKEN)
@@ -26,15 +25,14 @@ OWNERS = [6609574645, 5960749063]  # Replace with real IDs
 if not os.path.exists("uploaded_files"):
     os.makedirs("uploaded_files")
 
-# Data file to store accounts, user data, admins, and their status
-DATA_FILE = 'data.json'
-if not os.path.exists(DATA_FILE):
-    with open(DATA_FILE, "w") as file:
-        # --- MODIFIED: Added 'admins' list to the data structure ---
-        json.dump({"accounts": [], "users": [], "giveaways": [], "admins": []}, file)
+# MongoDB connection
+client = MongoClient(MONGO_URI)
+db = client["rewardrush"]
+state_col = db["state"]
 
-# Thread lock for data access
-data_lock = threading.Lock()
+# Ensure the main state document exists on first run
+if state_col.find_one({"_id": "main"}) is None:
+    state_col.insert_one({"_id": "main", "accounts": [], "users": [], "giveaways": [], "admins": [], "banned": []})
 
 # In-memory storage for cooldowns and rate limiting
 user_cooldowns = {}  # Format: {user_id: {"last_redeem": timestamp, "command_count": count, "last_command": timestamp}}
@@ -48,14 +46,16 @@ CHANNELS = {
 }
 
 def load_data():
-    with data_lock:
-        with open(DATA_FILE, "r") as file:
-            return json.load(file)
+    doc = state_col.find_one({"_id": "main"})
+    if doc is None:
+        default = {"accounts": [], "users": [], "giveaways": [], "admins": [], "banned": []}
+        state_col.insert_one({"_id": "main", **default})
+        return default
+    doc.pop("_id", None)
+    return doc
 
 def save_data(data):
-    with data_lock:
-        with open(DATA_FILE, "w") as file:
-            json.dump(data, file, indent=4)
+    state_col.replace_one({"_id": "main"}, {"_id": "main", **data}, upsert=True)
 
 # --- NEW: Permission check functions ---
 def is_owner(user_id):
@@ -709,8 +709,12 @@ def backup_data_json(message):
         bot.reply_to(message, "🚫 You are not allowed to use this command.")
         return
     try:
-        with open('data.json', 'rb') as f:
-            bot.send_document(message.chat.id, f, caption="📂 Here is your latest data.json backup.", parse_mode="Markdown")
+        data = load_data()
+        backup_buffer = BytesIO()
+        backup_buffer.write(json.dumps(data, indent=4).encode('utf-8'))
+        backup_buffer.seek(0)
+        backup_buffer.name = "data_backup.json"
+        bot.send_document(message.chat.id, backup_buffer, caption="📂 Here is your latest data backup from MongoDB.", parse_mode="Markdown")
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ Failed to send backup: {e}")
 
